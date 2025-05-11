@@ -16,6 +16,49 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def to_device(data, device):
+    if len(data) == 13:  # Updated for emotions
+        (
+            ids,
+            raw_texts,
+            speakers,
+            texts,
+            src_lens,
+            max_src_len,
+            mels,
+            mel_lens,
+            max_mel_len,
+            pitches,
+            energies,
+            durations,
+            emotions,
+        ) = data
+
+        speakers = torch.from_numpy(speakers).long().to(device)
+        texts = torch.from_numpy(texts).long().to(device)
+        src_lens = torch.from_numpy(src_lens).to(device)
+        mels = torch.from_numpy(mels).float().to(device)
+        mel_lens = torch.from_numpy(mel_lens).to(device)
+        pitches = torch.from_numpy(pitches).float().to(device)
+        energies = torch.from_numpy(energies).to(device)
+        durations = torch.from_numpy(durations).long().to(device)
+        emotions = torch.from_numpy(emotions).long().to(device)  # Added emotions
+
+        return (
+            ids,
+            raw_texts,
+            speakers,
+            texts,
+            src_lens,
+            max_src_len,
+            mels,
+            mel_lens,
+            max_mel_len,
+            pitches,
+            energies,
+            durations,
+            emotions,
+        )
+
     if len(data) == 12:
         (
             ids,
@@ -64,6 +107,9 @@ def to_device(data, device):
         src_lens = torch.from_numpy(src_lens).to(device)
 
         return (ids, raw_texts, speakers, texts, src_lens, max_src_len)
+
+    print(f"Error: Unexpected batch length {len(data)} in to_device")
+    return data  # Fallback to avoid None
 
 
 def log(

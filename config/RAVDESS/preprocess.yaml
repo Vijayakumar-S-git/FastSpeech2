@@ -1,0 +1,43 @@
+dataset: RAVDESS
+
+path:
+  corpus_path: ../backend/data
+  train_path: train/train_metadata_with_durations.txt
+  val_path: valid/valid_metadata_with_durations.txt
+  lexicon_path: ../backend/data/vocab.txt
+  preprocessed_path: ../backend/data
+  raw_path: ../backend/data/raw
+
+preprocessing:
+  val_size: 512
+  text:
+    text_cleaners: ["english_cleaners"]
+    language: "en"
+  audio:
+    sampling_rate: 22050
+    filter_length: 1024
+    hop_length: 256
+    n_mel_channels: 80
+  stft:
+    filter_length: 1024
+    hop_length: 256
+    win_length: 1024
+  mel:
+    n_mel_channels: 80
+    mel_fmin: 0
+    mel_fmax: 8000 # please set to 8000 for HiFi-GAN vocoder, set to null for MelGAN vocoder
+  pitch:
+    feature: "phoneme_level" # support 'phoneme_level' or 'frame_level'
+    normalization: True
+  energy:
+    feature: "phoneme_level" # support 'phoneme_level' or 'frame_level'
+    normalization: True
+emotions:
+  neutral: 0
+  calm: 1
+  happy: 2
+  sad: 3
+  angry: 4
+  fearful: 5
+  disgust: 6
+  surprised: 7

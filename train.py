@@ -24,17 +24,26 @@ def main(args, configs):
     preprocess_config, model_config, train_config = configs
 
     # Get dataset
-    dataset = Dataset(
-        "train.txt", preprocess_config, train_config, sort=True, drop_last=True
+    train_dataset = Dataset(
+        "train/train_metadata_with_durations.txt", preprocess_config, train_config, sort=True, drop_last=True
+    )
+    val_dataset = Dataset(
+        "valid/valid_metadata_with_durations.txt", preprocess_config, train_config, sort=False, drop_last=False
     )
     batch_size = train_config["optimizer"]["batch_size"]
     group_size = 4  # Set this larger than 1 to enable sorting in Dataset
-    assert batch_size * group_size < len(dataset)
-    loader = DataLoader(
-        dataset,
+    assert batch_size * group_size < len(train_dataset)
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=batch_size * group_size,
         shuffle=True,
-        collate_fn=dataset.collate_fn,
+        collate_fn=train_dataset.collate_fn,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=val_dataset.collate_fn,
     )
 
     # Prepare model
@@ -73,13 +82,49 @@ def main(args, configs):
     outer_bar.update()
 
     while True:
-        inner_bar = tqdm(total=len(loader), desc="Epoch {}".format(epoch), position=1)
-        for batchs in loader:
+        inner_bar = tqdm(total=len(train_loader), desc="Epoch {}".format(epoch), position=1)
+        for batchs in train_loader:
             for batch in batchs:
                 batch = to_device(batch, device)
 
+                if batch is None:
+                    print("Error: Batch is None after to_device")
+                    continue
+                print("Batch type:", type(batch), "Batch length:", len(batch))
+                try:
+                    (
+                        ids,
+                        raw_texts,
+                        speakers,
+                        texts,
+                        text_lens,
+                        max_text_len,
+                        mels,
+                        mel_lens,
+                        max_mel_len,
+                        pitches,
+                        energies,
+                        durations,
+                        emotions,
+                    ) = batch
+                except TypeError as e:
+                    print("Unpack error:", e, "Batch content:", batch)
+                    raise
+
                 # Forward
-                output = model(*(batch[2:]))
+                output = model(
+                    speakers=speakers,
+                    texts=texts,
+                    src_lens=text_lens,
+                    max_src_len=max_text_len,
+                    emotions=emotions,  # Pass emotions
+                    mels=mels,
+                    mel_lens=mel_lens,
+                    max_mel_len=max_mel_len,
+                    p_targets=pitches,
+                    e_targets=energies,
+                    d_targets=durations,
+                )
 
                 # Cal Loss
                 losses = Loss(batch, output)
@@ -123,9 +168,7 @@ def main(args, configs):
                         fig=fig,
                         tag="Training/step_{}_{}".format(step, tag),
                     )
-                    sampling_rate = preprocess_config["preprocessing"]["audio"][
-                        "sampling_rate"
-                    ]
+                    sampling_rate = preprocess_config["preprocessing"]["audio"]["sampling_rate"]
                     log(
                         train_logger,
                         audio=wav_reconstruction,
@@ -141,7 +184,7 @@ def main(args, configs):
 
                 if step % val_step == 0:
                     model.eval()
-                    message = evaluate(model, step, configs, val_logger, vocoder)
+                    message = evaluate(model, step, configs, val_loader, val_logger, vocoder)
                     with open(os.path.join(val_log_path, "log.txt"), "a") as f:
                         f.write(message + "\n")
                     outer_bar.write(message)

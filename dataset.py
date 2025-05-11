@@ -4,6 +4,7 @@ import os
 
 import numpy as np
 from torch.utils.data import Dataset
+import yaml
 
 from text import text_to_sequence
 from utils.tools import pad_1D, pad_2D
@@ -17,8 +18,9 @@ class Dataset(Dataset):
         self.preprocessed_path = preprocess_config["path"]["preprocessed_path"]
         self.cleaners = preprocess_config["preprocessing"]["text"]["text_cleaners"]
         self.batch_size = train_config["optimizer"]["batch_size"]
+        self.emotion_map = preprocess_config["emotions"]  # Load emotion mapping
 
-        self.basename, self.speaker, self.text, self.raw_text = self.process_meta(
+        self.basename, self.speaker, self.text, self.phonemes, self.emotion, self.duration = self.process_meta(
             filename
         )
         with open(os.path.join(self.preprocessed_path, "speakers.json")) as f:
@@ -33,8 +35,11 @@ class Dataset(Dataset):
         basename = self.basename[idx]
         speaker = self.speaker[idx]
         speaker_id = self.speaker_map[speaker]
-        raw_text = self.raw_text[idx]
-        phone = np.array(text_to_sequence(self.text[idx], self.cleaners))
+        raw_text = self.text[idx]
+        phone = np.array(text_to_sequence(self.phonemes[idx], self.cleaners))
+        emotion = self.emotion[idx]
+        duration = np.array(self.duration[idx])
+
         mel_path = os.path.join(
             self.preprocessed_path,
             "mel",
@@ -46,19 +51,13 @@ class Dataset(Dataset):
             "pitch",
             "{}-pitch-{}.npy".format(speaker, basename),
         )
-        pitch = np.load(pitch_path)
+        pitch = np.load(pitch_path) if os.path.exists(pitch_path) else np.zeros_like(mel.shape[0])
         energy_path = os.path.join(
             self.preprocessed_path,
             "energy",
             "{}-energy-{}.npy".format(speaker, basename),
         )
-        energy = np.load(energy_path)
-        duration_path = os.path.join(
-            self.preprocessed_path,
-            "duration",
-            "{}-duration-{}.npy".format(speaker, basename),
-        )
-        duration = np.load(duration_path)
+        energy = np.load(energy_path) if os.path.exists(energy_path) else np.zeros_like(mel.shape[0])
 
         sample = {
             "id": basename,
@@ -69,6 +68,7 @@ class Dataset(Dataset):
             "pitch": pitch,
             "energy": energy,
             "duration": duration,
+            "emotion": emotion,
         }
 
         return sample
@@ -80,50 +80,93 @@ class Dataset(Dataset):
             name = []
             speaker = []
             text = []
-            raw_text = []
+            phonemes = []
+            emotions = []
+            durations = []
             for line in f.readlines():
-                n, s, t, r = line.strip("\n").split("|")
-                name.append(n)
+                n, t, p, e, s, d = line.strip("\n").split("|")
+                # Clean basename: use only filename without path or extension
+                clean_basename = os.path.splitext(os.path.basename(n))[0]
+                name.append(clean_basename)
                 speaker.append(s)
                 text.append(t)
-                raw_text.append(r)
-            return name, speaker, text, raw_text
+                phonemes.append(p)
+                emotions.append(self.emotion_map[e])
+                durations.append([int(x) for x in d.split()])
+            return name, speaker, text, phonemes, emotions, durations
 
     def reprocess(self, data, idxs):
         ids = [data[idx]["id"] for idx in idxs]
-        speakers = [data[idx]["speaker"] for idx in idxs]
-        texts = [data[idx]["text"] for idx in idxs]
         raw_texts = [data[idx]["raw_text"] for idx in idxs]
+        speakers = np.array([data[idx]["speaker"] for idx in idxs])
+        texts = [data[idx]["text"] for idx in idxs]  # List of phoneme sequences
+        text_lens = np.array([len(data[idx]["text"]) for idx in idxs])
+        max_text_len = max(text_lens)
         mels = [data[idx]["mel"] for idx in idxs]
+        mel_lens = np.array([data[idx]["mel"].shape[0] for idx in idxs])
+        max_mel_len = max(mel_lens)
         pitches = [data[idx]["pitch"] for idx in idxs]
         energies = [data[idx]["energy"] for idx in idxs]
         durations = [data[idx]["duration"] for idx in idxs]
-
-        text_lens = np.array([text.shape[0] for text in texts])
-        mel_lens = np.array([mel.shape[0] for mel in mels])
-
-        speakers = np.array(speakers)
-        texts = pad_1D(texts)
-        mels = pad_2D(mels)
-        pitches = pad_1D(pitches)
-        energies = pad_1D(energies)
-        durations = pad_1D(durations)
-
+        emotions = np.array([data[idx]["emotion"] for idx in idxs])  # Scalars
+        
+        # Validate durations and texts
+        for i, (dur, txt) in enumerate(zip(durations, texts)):
+            if len(dur) != len(txt):
+                print(f"Warning: Duration length {len(dur)} != text length {len(txt)} for id {ids[i]}")
+                # Fallback: set durations to ones if text length is incorrect
+                durations[i] = np.ones(len(txt))
+        
+        # Pad mel-spectrograms to max_mel_len
+        mels_padded = []
+        for mel in mels:
+            pad_amount = max_mel_len - mel.shape[0]
+            if pad_amount > 0:
+                mel = np.pad(mel, ((0, pad_amount), (0, 0)), mode='constant', constant_values=0)
+            mels_padded.append(mel)
+        mels = np.array(mels_padded)
+        
+        # Pad pitches to max_mel_len
+        pitches_padded = []
+        for pitch in pitches:
+            pad_amount = max_mel_len - len(pitch)
+            if pad_amount > 0:
+                pitch = np.pad(pitch, (0, pad_amount), mode='constant', constant_values=0)
+            pitches_padded.append(pitch)
+        pitches = np.array(pitches_padded)
+        
+        # Pad energies to max_mel_len
+        energies_padded = []
+        for energy in energies:
+            pad_amount = max_mel_len - len(energy)
+            if pad_amount > 0:
+                energy = np.pad(energy, (0, pad_amount), mode='constant', constant_values=0)
+            energies_padded.append(energy)
+        energies = np.array(energies_padded)
+        
+        durations = np.array(durations)
+        texts = np.array(texts)
+        
+        # Pad sequences
+        texts = pad_1D(texts, PAD=0)
+        durations = pad_1D(durations, PAD=0)
+        # No padding for emotions (scalars)
+        
         return (
             ids,
             raw_texts,
             speakers,
             texts,
             text_lens,
-            max(text_lens),
+            max_text_len,
             mels,
             mel_lens,
-            max(mel_lens),
+            max_mel_len,
             pitches,
             energies,
             durations,
+            emotions,
         )
-
     def collate_fn(self, data):
         data_size = len(data)
 
@@ -149,8 +192,9 @@ class Dataset(Dataset):
 class TextDataset(Dataset):
     def __init__(self, filepath, preprocess_config):
         self.cleaners = preprocess_config["preprocessing"]["text"]["text_cleaners"]
+        self.emotion_map = preprocess_config["emotions"]
 
-        self.basename, self.speaker, self.text, self.raw_text = self.process_meta(
+        self.basename, self.speaker, self.text, self.phonemes, self.emotion, self.duration = self.process_meta(
             filepath
         )
         with open(
@@ -167,35 +211,44 @@ class TextDataset(Dataset):
         basename = self.basename[idx]
         speaker = self.speaker[idx]
         speaker_id = self.speaker_map[speaker]
-        raw_text = self.raw_text[idx]
-        phone = np.array(text_to_sequence(self.text[idx], self.cleaners))
+        raw_text = self.text[idx]
+        phone = np.array(text_to_sequence(self.phonemes[idx], self.cleaners))
+        emotion = self.emotion[idx]
+        duration = np.array(self.duration[idx])
 
-        return (basename, speaker_id, phone, raw_text)
+        return (basename, speaker_id, phone, raw_text, emotion, duration)
 
     def process_meta(self, filename):
         with open(filename, "r", encoding="utf-8") as f:
             name = []
             speaker = []
             text = []
-            raw_text = []
+            phonemes = []
+            emotions = []
+            durations = []
             for line in f.readlines():
-                n, s, t, r = line.strip("\n").split("|")
+                n, t, p, e, s, d = line.strip("\n").split("|")
                 name.append(n)
                 speaker.append(s)
                 text.append(t)
-                raw_text.append(r)
-            return name, speaker, text, raw_text
+                phonemes.append(p)
+                emotions.append(self.emotion_map[e])
+                durations.append([int(x) for x in d.split()])
+            return name, speaker, text, phonemes, emotions, durations
 
     def collate_fn(self, data):
         ids = [d[0] for d in data]
         speakers = np.array([d[1] for d in data])
         texts = [d[2] for d in data]
         raw_texts = [d[3] for d in data]
+        emotions = np.array([d[4] for d in data])
+        durations = [d[5] for d in data]
         text_lens = np.array([text.shape[0] for text in texts])
 
         texts = pad_1D(texts)
+        durations = pad_1D(durations)
 
-        return ids, raw_texts, speakers, texts, text_lens, max(text_lens)
+        return ids, raw_texts, speakers, texts, text_lens, max(text_lens), emotions, durations
 
 
 if __name__ == "__main__":
@@ -203,21 +256,21 @@ if __name__ == "__main__":
     import torch
     import yaml
     from torch.utils.data import DataLoader
-    from utils.utils import to_device
+    from utils.tools import to_device
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     preprocess_config = yaml.load(
-        open("./config/LJSpeech/preprocess.yaml", "r"), Loader=yaml.FullLoader
+        open("./config/RAVDESS/preprocess.yaml", "r"), Loader=yaml.FullLoader
     )
     train_config = yaml.load(
-        open("./config/LJSpeech/train.yaml", "r"), Loader=yaml.FullLoader
+        open("./config/RAVDESS/train.yaml", "r"), Loader=yaml.FullLoader
     )
 
     train_dataset = Dataset(
-        "train.txt", preprocess_config, train_config, sort=True, drop_last=True
+        "train/train_metadata_with_durations.txt", preprocess_config, train_config, sort=True, drop_last=True
     )
     val_dataset = Dataset(
-        "val.txt", preprocess_config, train_config, sort=False, drop_last=False
+        "valid/valid_metadata_with_durations.txt", preprocess_config, train_config, sort=False, drop_last=False
     )
     train_loader = DataLoader(
         train_dataset,

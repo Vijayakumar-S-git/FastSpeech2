@@ -25,6 +25,8 @@ class FastSpeech2(nn.Module):
             preprocess_config["preprocessing"]["mel"]["n_mel_channels"],
         )
         self.postnet = PostNet()
+        # Emotion embedding: 8 emotions, same dimension as encoder
+        self.emotion_embedding = nn.Embedding(8, model_config["transformer"]["encoder_hidden"])
 
         self.speaker_emb = None
         if model_config["multi_speaker"]:
@@ -46,6 +48,7 @@ class FastSpeech2(nn.Module):
         texts,
         src_lens,
         max_src_len,
+        emotions,  # Added emotion input
         mels=None,
         mel_lens=None,
         max_mel_len=None,
@@ -64,6 +67,9 @@ class FastSpeech2(nn.Module):
         )
 
         output = self.encoder(texts, src_masks)
+        # Add emotion embedding to encoder output
+        emotion_emb = self.emotion_embedding(emotions)  # Shape: (batch, encoder_hidden)
+        output = output + emotion_emb.unsqueeze(1)  # Broadcasting: (batch, seq_len, encoder_hidden)
 
         if self.speaker_emb is not None:
             output = output + self.speaker_emb(speakers).unsqueeze(1).expand(
